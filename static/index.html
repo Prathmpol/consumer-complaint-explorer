@@ -1,0 +1,179 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Complaint Explorer</title>
+<script src="chart.umd.js"></script>
+<style>
+:root{--bg:#f6f5f1;--card:#fff;--ink:#1d2430;--mute:#677084;--line:#e3e1da;--accent:#1f5c99;--warn:#c2452d;
+--c1:#1f5c99;--c2:#d98e04;--c3:#2a9d8f;--c4:#c2452d;--c5:#7a5bb5;--c6:#6b7a8f;--c7:#8a9a2b;--c8:#c76b98}
+@media(prefers-color-scheme:dark){:root{--bg:#14171c;--card:#1c2027;--ink:#e8eaee;--mute:#98a1b3;--line:#2b313b;--accent:#6aa9e6;--warn:#ee7a62;
+--c1:#6aa9e6;--c2:#f0b43a;--c3:#4fc3b4;--c4:#ee7a62;--c5:#a58be0;--c6:#98a6bb;--c7:#b7c553;--c8:#e58fb7}}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif}
+header{padding:20px 16px 8px;max-width:1280px;margin:auto}
+h1{margin:0;font-size:24px;letter-spacing:-.02em}header p{margin:2px 0 0;color:var(--mute)}
+main{max-width:1280px;margin:auto;padding:0 16px 48px}
+.filters{display:flex;flex-wrap:wrap;gap:12px;align-items:end;background:var(--card);border:1px solid var(--line);border-radius:12px;padding:12px 14px;margin:12px 0;position:sticky;top:8px;z-index:5}
+.filters label{display:flex;flex-direction:column;font-size:12px;color:var(--mute);gap:3px}
+select,input,button{font:inherit;color:var(--ink);background:var(--bg);border:1px solid var(--line);border-radius:8px;padding:6px 8px}
+select[multiple]{height:64px;min-width:170px}button{cursor:pointer}button.primary{background:var(--accent);color:var(--bg);border-color:var(--accent)}
+.kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;margin-bottom:14px}
+.kpi{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:12px 14px}
+.kpi b{display:block;font-size:26px;letter-spacing:-.02em;font-variant-numeric:tabular-nums}.kpi span{font-size:12px;color:var(--mute)}
+nav{display:flex;gap:4px;border-bottom:1px solid var(--line);margin:8px 0 16px;overflow-x:auto}
+nav button{border:0;border-bottom:2px solid transparent;border-radius:0;background:none;padding:10px 14px;color:var(--mute);white-space:nowrap}
+nav button.on{color:var(--ink);border-color:var(--accent);font-weight:600}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,520px),1fr));gap:14px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:14px;min-width:0}
+.card h3{margin:0 0 2px;font-size:15px}.card p{margin:0 0 8px;color:var(--mute);font-size:12.5px}
+.ch{position:relative;height:300px}.wide{grid-column:1/-1}
+table{border-collapse:collapse;width:100%;font-size:13px;font-variant-numeric:tabular-nums}
+th,td{padding:5px 8px;text-align:right;border-bottom:1px solid var(--line)}th:first-child,td:first-child{text-align:left}
+.scroll{overflow-x:auto}.hm td{text-align:center;border:1px solid var(--card)}
+#msg{padding:40px;text-align:center;color:var(--mute);display:none}
+.tab{display:none}.tab.on{display:block}
+</style>
+</head>
+<body>
+<header><h1>Consumer Complaint Explorer</h1>
+<p>Interactive view of the CFPB complaint EDA — filter once, every chart and table updates.</p></header>
+<main>
+<div class="filters">
+ <label>Product<select id="f-product" multiple></select></label>
+ <label>State<select id="f-state" multiple></select></label>
+ <label>Channel<select id="f-channel" multiple></select></label>
+ <label>From<input type="date" id="f-start"></label>
+ <label>To<input type="date" id="f-end"></label>
+ <button class="primary" id="apply">Apply</button><button id="reset">Reset</button>
+</div>
+<div id="msg">No complaints match these filters.</div>
+<div id="app">
+<div class="kpis" id="kpis"></div>
+<nav id="tabs"></nav>
+<section class="tab" id="t-uni"><div class="grid" id="g-uni"></div></section>
+<section class="tab" id="t-bi"><div class="grid" id="g-bi"></div></section>
+<section class="tab" id="t-multi"><div class="grid" id="g-multi"></div></section>
+<section class="tab" id="t-piv"><div class="grid" id="g-piv"></div></section>
+</div>
+</main>
+<script>
+const $=s=>document.querySelector(s), css=v=>getComputedStyle(document.documentElement).getPropertyValue(v).trim();
+const pal=()=>[1,2,3,4,5,6,7,8].map(i=>css('--c'+i));
+const fmt=n=>n==null?'–':Number(n).toLocaleString(undefined,{maximumFractionDigits:2});
+let charts=[], data=null, tab='uni';
+
+async function init(){
+  const m=await (await fetch('/api/meta')).json();
+  const fill=(id,a)=>$(id).innerHTML=a.map(x=>`<option>${x}</option>`).join('');
+  fill('#f-product',m.products);fill('#f-state',m.states);fill('#f-channel',m.channels);
+  $('#f-start').min=$('#f-end').min=m.min_date;$('#f-start').max=$('#f-end').max=m.max_date;
+  const tabs={uni:'Univariate',bi:'Bivariate',multi:'Multivariate',piv:'Pivot tables'};
+  $('#tabs').innerHTML=Object.entries(tabs).map(([k,v])=>`<button data-t="${k}">${v}</button>`).join('');
+  $('#tabs').onclick=e=>{if(e.target.dataset.t){tab=e.target.dataset.t;showTab()}};
+  $('#apply').onclick=load;
+  $('#reset').onclick=()=>{document.querySelectorAll('.filters select,.filters input').forEach(el=>{el.value='';[...(el.options||[])].forEach(o=>o.selected=false)});load()};
+  load();
+}
+function query(){
+  const p=new URLSearchParams();
+  for(const [k,id] of [['product','#f-product'],['state','#f-state'],['channel','#f-channel']])
+    [...$(id).selectedOptions].forEach(o=>p.append(k,o.value));
+  if($('#f-start').value)p.set('start',$('#f-start').value);if($('#f-end').value)p.set('end',$('#f-end').value);
+  return p.toString();
+}
+async function load(){
+  const r=await fetch('/api/dashboard?'+query());data=await r.json();
+  $('#msg').style.display=data.empty?'block':'none';$('#app').style.display=data.empty?'none':'block';
+  if(data.empty)return;render();
+}
+function showTab(){
+  document.querySelectorAll('#tabs button').forEach(b=>b.classList.toggle('on',b.dataset.t===tab));
+  document.querySelectorAll('.tab').forEach(s=>s.classList.toggle('on',s.id==='t-'+tab));
+  charts.forEach(c=>c.resize());
+}
+function card(grid,title,note,wide){
+  const d=document.createElement('div');d.className='card'+(wide?' wide':'');
+  d.innerHTML=`<h3>${title}</h3><p>${note||''}</p>`;grid.appendChild(d);return d;
+}
+function chart(grid,title,note,cfg,wide){
+  const c=card(grid,title,note,wide),w=document.createElement('div');w.className='ch';
+  const cv=document.createElement('canvas');w.appendChild(cv);c.appendChild(w);
+  const grid_=css('--line'),mute=css('--mute');
+  cfg.options=Object.assign({responsive:true,maintainAspectRatio:false,animation:false},cfg.options||{});
+  cfg.options.color=mute;
+  for(const a of (cfg.type==='doughnut'?[]:['x','y'])){const s=((cfg.options.scales=cfg.options.scales||{})[a]=cfg.options.scales[a]||{});
+    s.ticks=Object.assign({color:mute},s.ticks);s.grid=Object.assign({color:grid_},s.grid);}
+  charts.push(new Chart(cv,cfg));
+}
+const bar=(g,t,n,o,{h=true,color=0,wide}={})=>chart(g,t,n,{type:'bar',data:{labels:o.labels,datasets:[{data:o.values,backgroundColor:pal()[color]}]},
+  options:{indexAxis:h?'y':'x',plugins:{legend:{display:false}}}},wide);
+const line=(g,t,n,o,wide)=>chart(g,t,n,{type:'line',data:{labels:o.labels,datasets:[{data:o.values,borderColor:pal()[0],pointRadius:0,borderWidth:2,tension:.2}]},
+  options:{plugins:{legend:{display:false}},scales:{x:{ticks:{maxTicksLimit:10}}}}},wide);
+const stacked=(g,t,n,o,h=false)=>chart(g,t,n,{type:'bar',data:{labels:o.rows,datasets:o.cols.map((c,i)=>({label:c,data:o.data.map(r=>r[i]),backgroundColor:pal()[i%8]}))},
+  options:{indexAxis:h?'y':'x',scales:{x:{stacked:true,max:h?100:undefined},y:{stacked:true,max:h?undefined:100}},plugins:{legend:{position:'bottom',labels:{boxWidth:10}}}}});
+function boxChart(g,t,n,b){
+  chart(g,t,n,{type:'bar',data:{labels:b.map(x=>x.label),datasets:[
+    {label:'Mean',data:b.map(x=>x.mean),backgroundColor:pal()[0]},
+    {label:'Median',data:b.map(x=>x.median),backgroundColor:pal()[2]},
+    {label:'75th pct',data:b.map(x=>x.q3),backgroundColor:pal()[1]},
+    {label:'Max (capped)',data:b.map(x=>x.max),backgroundColor:pal()[3]}]},
+    options:{plugins:{legend:{position:'bottom',labels:{boxWidth:10}}},scales:{y:{title:{display:true,text:'days to send'}}}}});
+}
+function heat(g,t,n,m,{dec=0,rate=false,wide}={}){
+  const c=card(g,t,n,wide),flat=m.data.flat().filter(v=>v!=null),mx=Math.max(...flat),mn=rate?Math.min(...flat):0;
+  const col=v=>{if(v==null)return'transparent';let k=mx===mn?1:(v-mn)/(mx-mn);
+    return `color-mix(in srgb, ${css(rate?'--c3':'--c1')} ${Math.round(10+k*70)}%, ${css('--card')})`};
+  c.insertAdjacentHTML('beforeend',`<div class="scroll"><table class="hm"><tr><th></th>${m.cols.map(x=>`<th>${x}</th>`).join('')}</tr>${
+    m.rows.map((r,i)=>`<tr><td>${r}</td>${m.data[i].map(v=>`<td style="background:${col(v)}">${v==null?'–':v.toLocaleString(undefined,{maximumFractionDigits:dec})}${rate&&v!=null?'%':''}</td>`).join('')}</tr>`).join('')}</table></div>`);
+}
+function table(g,t,n,p,wide){
+  const c=card(g,t,n,wide);
+  c.insertAdjacentHTML('beforeend',`<div class="scroll"><table><tr>${p.cols.map(x=>`<th>${x}</th>`).join('')}</tr>${
+    p.rows.map(r=>`<tr>${r.map(v=>`<td>${typeof v==='number'?fmt(v):v}</td>`).join('')}</tr>`).join('')}</table></div>`);
+}
+function render(){
+  charts.forEach(c=>c.destroy());charts=[];
+  for(const id of ['uni','bi','multi','piv'])$('#g-'+id).innerHTML='';
+  const k=data.kpis,u=data.univariate,b=data.bivariate,m=data.multivariate,p=data.pivots;
+  $('#kpis').innerHTML=[['Complaints',fmt(k.total)],['Timely response',k.timely_pct+'%'],['Avg days to send',k.avg_days],
+    ['With narrative',k.narrative_pct+'%'],['Companies',fmt(k.companies)],['Monetary relief',k.monetary_pct+'%']]
+    .map(([l,v])=>`<div class="kpi"><b>${v}</b><span>${l}</span></div>`).join('');
+  let g=$('#g-uni');
+  line(g,'Complaints received','Monthly volume',u.monthly_received,true);
+  line(g,'Complaints sent to company','Tracks received closely — most are routed the same day',u.monthly_sent,true);
+  bar(g,'Top products','',u.product);bar(g,'Top sub-products','"Not Specified" = missing value',u.sub_product,{color:2});
+  bar(g,'Top issues','',u.issue,{color:1});bar(g,'Top sub-issues','"Not Specified" = missing value',u.sub_issue,{color:3});
+  bar(g,'Top companies','',u.company,{color:4});bar(g,'Top states','',u.state,{color:5});
+  chart(g,'Submission channel','Channels under 2% grouped as Other',{type:'doughnut',data:{labels:u.channel.labels,datasets:[{data:u.channel.values,backgroundColor:pal(),borderColor:css('--card')}]},
+    options:{plugins:{legend:{position:'right'}}}});
+  bar(g,'Company response','',u.response,{color:6});
+  bar(g,'Timely response','Class imbalance check',u.timely,{h:false,color:2});
+  bar(g,'Narrative word count','Narratives provided only',u.words,{h:false,color:0});
+  g=$('#g-bi');
+  stacked(g,'Timely response by product','Top 5 products, % of complaints',b.product_timely);
+  stacked(g,'Timely response by state','Top 5 states, %',b.state_timely);
+  stacked(g,'Timely response by channel','%',b.channel_timely);
+  stacked(g,'Company response by product','Top 5 products, %',b.product_response);
+  stacked(g,'Timely response by issue','Top 10 issues, %',b.issue_timely,true);
+  boxChart(g,'Days to send by product','Mean / median / 75th percentile / max',b.box_product);
+  boxChart(g,'Days to send by state','',b.box_state);boxChart(g,'Days to send by channel','',b.box_channel);
+  boxChart(g,'Days to send by company response','',b.box_response);
+  line(g,'Complaint volume over time','Monthly',u.monthly_received);
+  g=$('#g-multi');
+  heat(g,'Product × State','Complaint counts, top 5 each',m.product_state);
+  heat(g,'State × Company response','Complaint counts, top 5 states',m.state_response);
+  heat(g,'% timely: Product × Channel','Lower values stand out',m.product_channel_rate,{dec:1,rate:true,wide:true});
+  heat(g,'Avg days to send: Product × Timely?','Late responses show higher routing delay',m.avg_days,{dec:2});
+  chart(g,'Monthly volume, top 3 products','',{type:'line',data:{labels:m.monthly_top3.labels,datasets:Object.entries(m.monthly_top3.series).map(([n,v],i)=>({label:n,data:v,borderColor:pal()[i],pointRadius:0,borderWidth:2}))},
+    options:{plugins:{legend:{position:'bottom',labels:{boxWidth:10}}},scales:{x:{ticks:{maxTicksLimit:10}}}}});
+  g=$('#g-piv');
+  table(g,'Product × Timely response','Exact counts',p.product_timely,true);
+  table(g,'State × Company response','Top 10 states',p.state_response,true);
+  table(g,'Days to send by product','Mean vs median',p.days_by_product,true);
+  showTab();
+}
+init();
+</script>
+</body>
+</html>
